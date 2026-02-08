@@ -1,0 +1,21 @@
+database:
+  host: 82.157.0.40
+  port: 5432
+  user: postgres
+  password: 19542061et
+  name: gin-saas
+public-jwt-config:
+  access_secret_key: public_secret_key
+  access_issuer: gin_saas
+  access_expire: 3600 #seconds
+  refresh_secret_key: refresh_secret_key
+  refresh_issuer: gin_saas
+  refresh_expire: 86400 #seconds
+server:
+  name: gin_saas
+  domain: localhost
+  host: localhost
+  port: 8000
+  debug: true
+  request_timeout: 5 # seconds
+  
