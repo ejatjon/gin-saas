@@ -14,15 +14,14 @@ type Permission struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-
-type group struct {
-	ID        int   `json:"id" `
-	Name      string `json:"name"`
-	PermissionsID []int `json:"permissions_id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+// Group 用户组结构体
+type Group struct {
+	ID            int       `json:"id"`
+	Name          string    `json:"name"`
+	PermissionsID []int     `json:"permissions_id"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
-
 
 func CreateGroupPermissionTable(ctx context.Context, conn *pgxpool.Conn) error {
 	query := `
@@ -32,14 +31,14 @@ func CreateGroupPermissionTable(ctx context.Context, conn *pgxpool.Conn) error {
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
-		
+
 		CREATE TABLE IF NOT EXISTS permissions (
 			id SERIAL PRIMARY KEY,
 			name VARCHAR(255) UNIQUE NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
-		
+
 		CREATE TABLE IF NOT EXISTS group_permissions (
 			group_id INT NOT NULL,
 			permission_id INT NOT NULL,
@@ -47,12 +46,12 @@ func CreateGroupPermissionTable(ctx context.Context, conn *pgxpool.Conn) error {
 			FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
 			FOREIGN KEY (permission_id) REFERENCES permissions(id) ON DELETE CASCADE
 		);
-		
+
 		CREATE INDEX IF NOT EXISTS idx_group_permissions_group_id ON group_permissions(group_id);
 		CREATE INDEX IF NOT EXISTS idx_group_permissions_permission_id ON group_permissions(permission_id);
-		
+
 		DROP TRIGGER IF EXISTS update_group ON groups;
-		
+
 		CREATE TRIGGER update_group
 		AFTER UPDATE ON groups
 		FOR EACH ROW
