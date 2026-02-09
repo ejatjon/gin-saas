@@ -13,7 +13,7 @@ import (
 // GroupRepository handles group data access and permission management
 type GroupRepository interface {
 	// Group CRUD operations
-	CreateGroup(ctx context.Context, conn *pgxpool.Conn, group *domain.Group) (*domain.Group, error)
+	CreateGroup(ctx context.Context, conn *pgxpool.Conn, name string) (*domain.Group, error)
 	GetGroup(ctx context.Context, conn *pgxpool.Conn, id int) (*domain.Group, error)
 	UpdateGroup(ctx context.Context, conn *pgxpool.Conn, group *domain.Group) (*domain.Group, error)
 	DeleteGroup(ctx context.Context, conn *pgxpool.Conn, id int) error
@@ -27,7 +27,7 @@ type GroupRepository interface {
 	SetGroupPermissions(ctx context.Context, conn *pgxpool.Conn, groupID int, permissionIDs []int) error
 
 	// Permission CRUD operations
-	CreatePermission(ctx context.Context, conn *pgxpool.Conn, permission *domain.Permission) (*domain.Permission, error)
+	CreatePermission(ctx context.Context, conn *pgxpool.Conn, permission string) (*domain.Permission, error)
 	GetPermission(ctx context.Context, conn *pgxpool.Conn, id int) (*domain.Permission, error)
 	GetPermissionByName(ctx context.Context, conn *pgxpool.Conn, name string) (*domain.Permission, error)
 	UpdatePermission(ctx context.Context, conn *pgxpool.Conn, permission *domain.Permission) (*domain.Permission, error)
@@ -38,6 +38,8 @@ type GroupRepository interface {
 	GroupExists(ctx context.Context, conn *pgxpool.Conn, id int) (bool, error)
 	PermissionExists(ctx context.Context, conn *pgxpool.Conn, id int) (bool, error)
 	HasPermission(ctx context.Context, conn *pgxpool.Conn, groupID, permissionID int) (bool, error)
+	UserHasPermission(ctx context.Context, conn *pgxpool.Conn, userID, permissionID int) (bool, error)
+	UserHasPermissionByName(ctx context.Context, conn *pgxpool.Conn, userID int, permissionName string) (bool, error)
 }
 
 // groupRepository implements GroupRepository
@@ -49,14 +51,15 @@ func NewGroupRepository() GroupRepository {
 }
 
 // CreateGroup creates a new group
-func (gr *groupRepository) CreateGroup(ctx context.Context, conn *pgxpool.Conn, group *domain.Group) (*domain.Group, error) {
+func (gr *groupRepository) CreateGroup(ctx context.Context, conn *pgxpool.Conn, name string) (*domain.Group, error) {
 	query := `
 		INSERT INTO groups (name)
 		VALUES ($1)
 		RETURNING id, created_at, updated_at
 	`
-
-	err := conn.QueryRow(ctx, query, group.Name).Scan(
+	var group domain.Group
+	group.Name = name
+	err := conn.QueryRow(ctx, query, name).Scan(
 		&group.ID,
 		&group.CreatedAt,
 		&group.UpdatedAt,
@@ -65,23 +68,18 @@ func (gr *groupRepository) CreateGroup(ctx context.Context, conn *pgxpool.Conn, 
 		return nil, fmt.Errorf("failed to create group: %w", err)
 	}
 
-	// Set permissions if provided
-	if len(group.PermissionsID) > 0 {
-		err = gr.SetGroupPermissions(ctx, conn, group.ID, group.PermissionsID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to set group permissions: %w", err)
-		}
-	}
 
-	return group, nil
+	return &group, nil
 }
 
 // GetGroup retrieves a group by ID with its permissions
 func (gr *groupRepository) GetGroup(ctx context.Context, conn *pgxpool.Conn, id int) (*domain.Group, error) {
 	// Get group basic info
 	query := `
-		SELECT id, name, created_at, updated_at
+		SELECT id, name,ARRAY_AGG(permissions.id) as permissions, created_at, updated_at
 		FROM groups
+		JOIN group_permissions ON groups.id = group_permissions.group_id
+		JOIN permissions ON group_permissions.permission_id = permissions.id
 		WHERE id = $1
 	`
 
@@ -89,6 +87,7 @@ func (gr *groupRepository) GetGroup(ctx context.Context, conn *pgxpool.Conn, id 
 	err := conn.QueryRow(ctx, query, id).Scan(
 		&group.ID,
 		&group.Name,
+		&group.PermissionsID,
 		&group.CreatedAt,
 		&group.UpdatedAt,
 	)
@@ -98,19 +97,6 @@ func (gr *groupRepository) GetGroup(ctx context.Context, conn *pgxpool.Conn, id 
 		}
 		return nil, fmt.Errorf("failed to get group: %w", err)
 	}
-
-	// Get group permissions
-	permissions, err := gr.GetGroupPermissions(ctx, conn, id)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get group permissions: %w", err)
-	}
-
-	// Extract permission IDs
-	group.PermissionsID = make([]int, len(permissions))
-	for i, permission := range permissions {
-		group.PermissionsID[i] = permission.ID
-	}
-
 	return group, nil
 }
 
@@ -118,7 +104,7 @@ func (gr *groupRepository) GetGroup(ctx context.Context, conn *pgxpool.Conn, id 
 func (gr *groupRepository) UpdateGroup(ctx context.Context, conn *pgxpool.Conn, group *domain.Group) (*domain.Group, error) {
 	query := `
 		UPDATE groups
-		SET name = $2, updated_at = CURRENT_TIMESTAMP
+		SET name = $2,
 		WHERE id = $1
 		RETURNING id, name, created_at, updated_at
 	`
@@ -135,14 +121,6 @@ func (gr *groupRepository) UpdateGroup(ctx context.Context, conn *pgxpool.Conn, 
 			return nil, fmt.Errorf("group not found")
 		}
 		return nil, fmt.Errorf("failed to update group: %w", err)
-	}
-
-	// Update permissions if provided
-	if group.PermissionsID != nil {
-		err = gr.SetGroupPermissions(ctx, conn, group.ID, group.PermissionsID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to update group permissions: %w", err)
-		}
 	}
 
 	// Get updated permissions
@@ -178,11 +156,10 @@ func (gr *groupRepository) DeleteGroup(ctx context.Context, conn *pgxpool.Conn, 
 func (gr *groupRepository) ListGroups(ctx context.Context, conn *pgxpool.Conn, page, pageSize int) ([]*domain.Group, error) {
 	query := `
 		SELECT g.id, g.name, g.created_at, g.updated_at,
-		       COALESCE(ARRAY_AGG(gp.permission_id) FILTER (WHERE gp.permission_id IS NOT NULL), '{}') as permissions
+		       ARRAY_AGG(gp.permission_id) as permissions_id
 		FROM groups g
-		LEFT JOIN group_permissions gp ON g.id = gp.group_id
+		JOIN group_permissions gp ON g.id = gp.group_id
 		GROUP BY g.id, g.name, g.created_at, g.updated_at
-		ORDER BY g.id
 		LIMIT $1 OFFSET $2
 	`
 
@@ -191,49 +168,22 @@ func (gr *groupRepository) ListGroups(ctx context.Context, conn *pgxpool.Conn, p
 		return nil, fmt.Errorf("failed to list groups: %w", err)
 	}
 	defer rows.Close()
-
-	var groups []*domain.Group
-	for rows.Next() {
-		group := &domain.Group{}
-		var permissions []int32
-
-		err := rows.Scan(
-			&group.ID,
-			&group.Name,
-			&group.CreatedAt,
-			&group.UpdatedAt,
-			&permissions,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan group row: %w", err)
-		}
-
-		// Convert []int32 to []int
-		group.PermissionsID = make([]int, len(permissions))
-		for i, pid := range permissions {
-			group.PermissionsID[i] = int(pid)
-		}
-
-		groups = append(groups, group)
+	
+	groups, err := pgx.CollectRows(rows,pgx.RowTo[*domain.Group])
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect rows: %w", err)
 	}
-
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating groups: %w", err)
-	}
-
 	return groups, nil
 }
 
 // SearchGroups searches groups by name
 func (gr *groupRepository) SearchGroups(ctx context.Context, conn *pgxpool.Conn, query string, page, pageSize int) ([]*domain.Group, error) {
 	searchQuery := `
-		SELECT g.id, g.name, g.created_at, g.updated_at,
-		       COALESCE(ARRAY_AGG(gp.permission_id) FILTER (WHERE gp.permission_id IS NOT NULL), '{}') as permissions
+		SELECT g.id, g.name, g.created_at, g.updated_at, ARRAY_AGG(gp.permission_id) as permissions_id
 		FROM groups g
-		LEFT JOIN group_permissions gp ON g.id = gp.group_id
+		JOIN group_permissions gp ON g.id = gp.group_id
 		WHERE g.name ILIKE $1
 		GROUP BY g.id, g.name, g.created_at, g.updated_at
-		ORDER BY g.id
 		LIMIT $2 OFFSET $3
 	`
 
@@ -243,32 +193,8 @@ func (gr *groupRepository) SearchGroups(ctx context.Context, conn *pgxpool.Conn,
 	}
 	defer rows.Close()
 
-	var groups []*domain.Group
-	for rows.Next() {
-		group := &domain.Group{}
-		var permissions []int32
-
-		err := rows.Scan(
-			&group.ID,
-			&group.Name,
-			&group.CreatedAt,
-			&group.UpdatedAt,
-			&permissions,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan group row: %w", err)
-		}
-
-		// Convert []int32 to []int
-		group.PermissionsID = make([]int, len(permissions))
-		for i, pid := range permissions {
-			group.PermissionsID[i] = int(pid)
-		}
-
-		groups = append(groups, group)
-	}
-
-	if err = rows.Err(); err != nil {
+	groups ,err := pgx.CollectRows(rows,pgx.RowTo[*domain.Group])
+	if err != nil {
 		return nil, fmt.Errorf("error iterating groups: %w", err)
 	}
 
@@ -416,14 +342,15 @@ func (gr *groupRepository) SetGroupPermissions(ctx context.Context, conn *pgxpoo
 }
 
 // CreatePermission creates a new permission
-func (gr *groupRepository) CreatePermission(ctx context.Context, conn *pgxpool.Conn, permission *domain.Permission) (*domain.Permission, error) {
+func (gr *groupRepository) CreatePermission(ctx context.Context, conn *pgxpool.Conn, name string) (*domain.Permission, error) {
 	query := `
 		INSERT INTO permissions (name)
 		VALUES ($1)
 		RETURNING id, created_at
 	`
-
-	err := conn.QueryRow(ctx, query, permission.Name).Scan(
+	var permission domain.Permission
+	permission.Name = name
+	err := conn.QueryRow(ctx, query, name).Scan(
 		&permission.ID,
 		&permission.CreatedAt,
 	)
@@ -431,7 +358,7 @@ func (gr *groupRepository) CreatePermission(ctx context.Context, conn *pgxpool.C
 		return nil, fmt.Errorf("failed to create permission: %w", err)
 	}
 
-	return permission, nil
+	return &permission, nil
 }
 
 // GetPermission retrieves a permission by ID
@@ -587,6 +514,41 @@ func (gr *groupRepository) HasPermission(ctx context.Context, conn *pgxpool.Conn
 	err := conn.QueryRow(ctx, query, groupID, permissionID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("failed to check group permission: %w", err)
+	}
+	return exists, nil
+}
+
+// UserHasPermission checks if a user has a specific permission through their groups
+func (gr *groupRepository) UserHasPermission(ctx context.Context, conn *pgxpool.Conn, userID, permissionID int) (bool, error) {
+	query := `
+		SELECT EXISTS(
+			SELECT 1
+			FROM user_groups ug
+			JOIN group_permissions gp ON ug.group_id = gp.group_id
+			WHERE ug.user_id = $1 AND gp.permission_id = $2
+		)`
+	var exists bool
+	err := conn.QueryRow(ctx, query, userID, permissionID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check user permission: %w", err)
+	}
+	return exists, nil
+}
+
+// UserHasPermissionByName checks if a user has a specific permission by permission name through their groups
+func (gr *groupRepository) UserHasPermissionByName(ctx context.Context, conn *pgxpool.Conn, userID int, permissionName string) (bool, error) {
+	query := `
+		SELECT EXISTS(
+			SELECT 1
+			FROM user_groups ug
+			JOIN group_permissions gp ON ug.group_id = gp.group_id
+			JOIN permissions p ON gp.permission_id = p.id
+			WHERE ug.user_id = $1 AND p.name = $2
+		)`
+	var exists bool
+	err := conn.QueryRow(ctx, query, userID, permissionName).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check user permission by name: %w", err)
 	}
 	return exists, nil
 }

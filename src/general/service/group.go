@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"strconv"
+	"log"
 
 	"saas/src/bootstrap"
 	"saas/src/general/domain"
@@ -15,26 +15,30 @@ import (
 // GroupService handles group and permission management operations
 type GroupService interface {
 	// Group management
-	CreateGroup(ctx context.Context, tenantId string, name string) (*domain.Group, error)
-	GetGroup(ctx context.Context, tenantId string, id string) (*domain.Group, error)
-	UpdateGroup(ctx context.Context, tenantId string, id string, name string) (*domain.Group, error)
-	DeleteGroup(ctx context.Context, tenantId string, id string) (*domain.Group, error)
-	ListGroups(ctx context.Context, tenantId string, page int, pageSize int) ([]*domain.Group, error)
-	SearchGroups(ctx context.Context, tenantId string, query string, page int, pageSize int) ([]*domain.Group, error)
+	CreateGroup(ctx context.Context, tenantName string, name string) (*domain.Group, error)
+	GetGroup(ctx context.Context, tenantName string, id int) (*domain.Group, error)
+	UpdateGroup(ctx context.Context, tenantName string, id int, name string) (*domain.Group, error)
+	DeleteGroup(ctx context.Context, tenantName string, id int) (*domain.Group, error)
+	ListGroups(ctx context.Context, tenantName string, page int, pageSize int) ([]*domain.Group, error)
+	SearchGroups(ctx context.Context, tenantName string, query string, page int, pageSize int) ([]*domain.Group, error)
 
 	// Permission management
-	AddPermissionToGroup(ctx context.Context, tenantId string, groupId string, permissionId string) error
-	RemovePermissionFromGroup(ctx context.Context, tenantId string, groupId string, permissionId string) error
-	GetGroupPermissions(ctx context.Context, tenantId string, groupId string) ([]*domain.Permission, error)
-	SetGroupPermissions(ctx context.Context, tenantId string, groupId string, permissionIds []string) error
+	AddPermissionToGroup(ctx context.Context, tenantName string, groupId int, permissionId int) error
+	RemovePermissionFromGroup(ctx context.Context, tenantName string, groupId int, permissionId int) error
+	GetGroupPermissions(ctx context.Context, tenantName string, groupId int) ([]*domain.Permission, error)
+	SetGroupPermissions(ctx context.Context, tenantName string, groupId int, permissionIds []int) error
 
 	// Permission CRUD
-	CreatePermission(ctx context.Context, tenantId string, name string) (*domain.Permission, error)
-	GetPermission(ctx context.Context, tenantId string, id string) (*domain.Permission, error)
-	GetPermissionByName(ctx context.Context, tenantId string, name string) (*domain.Permission, error)
-	UpdatePermission(ctx context.Context, tenantId string, id string, name string) (*domain.Permission, error)
-	DeletePermission(ctx context.Context, tenantId string, id string) error
-	ListPermissions(ctx context.Context, tenantId string, page int, pageSize int) ([]*domain.Permission, error)
+	CreatePermission(ctx context.Context, tenantName string, name string) (*domain.Permission, error)
+	GetPermission(ctx context.Context, tenantName string, id int) (*domain.Permission, error)
+	GetPermissionByName(ctx context.Context, tenantName string, name string) (*domain.Permission, error)
+	UpdatePermission(ctx context.Context, tenantName string, id int, name string) (*domain.Permission, error)
+	DeletePermission(ctx context.Context, tenantName string, id int) error
+	ListPermissions(ctx context.Context, tenantName string, page int, pageSize int) ([]*domain.Permission, error)
+
+	// Permission check for users
+	UserHasPermission(ctx context.Context, tenantName string, userId int, permissionId int) (bool, error)
+	UserHasPermissionByName(ctx context.Context, tenantName string, userId int, permissionName string) (bool, error)
 }
 
 type groupService struct {
@@ -50,55 +54,30 @@ func NewGroupService(dbManager *bootstrap.DBManager, groupRepo repository.GroupR
 	}
 }
 
-// getConnForTenant gets database connection for tenant schema
-func (s *groupService) getConnForTenant(ctx context.Context, tenantId string) (*pgxpool.Conn, error) {
-	conn, err := s.dbManager.GetConnForSchema(ctx, tenantId)
+// getConnForTenant 获取对应租户schema 的链接
+func (s *groupService) getConnForTenant(ctx context.Context, tenantName string) (*pgxpool.Conn, error) {
+	conn, err := s.dbManager.GetConnForSchema(ctx, tenantName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get database connection for tenant %s: %w", tenantId, err)
+		return nil, fmt.Errorf("failed to get database connection for tenant %s: %w", tenantName, err)
 	}
 	return conn, nil
 }
 
-// parseStringToInt parses string to int with error handling
-func parseStringToInt(id string, fieldName string) (int, error) {
-	value, err := strconv.Atoi(id)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", fieldName, err)
-	}
-	return value, nil
-}
-
-// parseStringSliceToIntSlice parses slice of strings to slice of ints
-func parseStringSliceToIntSlice(stringIds []string, fieldName string) ([]int, error) {
-	intIds := make([]int, len(stringIds))
-	for i, str := range stringIds {
-		val, err := strconv.Atoi(str)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s at index %d: %w", fieldName, i, err)
-		}
-		intIds[i] = val
-	}
-	return intIds, nil
-}
-
-// CreateGroup creates a new group
-func (s *groupService) CreateGroup(ctx context.Context, tenantId string, name string) (*domain.Group, error) {
+// CreateGroup 创建新的用户组
+func (s *groupService) CreateGroup(ctx context.Context, tenantName string, name string) (*domain.Group, error) {
 	if name == "" {
 		return nil, fmt.Errorf("group name is required")
 	}
 
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Release()
 
-	group := &domain.Group{
-		Name: name,
-		// PermissionsID will be set by repository if needed
-	}
+	
 
-	createdGroup, err := s.groupRepo.CreateGroup(ctx, conn, group)
+	createdGroup, err := s.groupRepo.CreateGroup(ctx, conn, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create group: %w", err)
 	}
@@ -107,19 +86,15 @@ func (s *groupService) CreateGroup(ctx context.Context, tenantId string, name st
 }
 
 // GetGroup retrieves a group by ID
-func (s *groupService) GetGroup(ctx context.Context, tenantId string, id string) (*domain.Group, error) {
-	groupID, err := parseStringToInt(id, "group ID")
-	if err != nil {
-		return nil, err
-	}
+func (s *groupService) GetGroup(ctx context.Context, tenantName string, id int) (*domain.Group, error) {
 
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Release()
 
-	group, err := s.groupRepo.GetGroup(ctx, conn, groupID)
+	group, err := s.groupRepo.GetGroup(ctx, conn, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group: %w", err)
 	}
@@ -128,24 +103,19 @@ func (s *groupService) GetGroup(ctx context.Context, tenantId string, id string)
 }
 
 // UpdateGroup updates group information
-func (s *groupService) UpdateGroup(ctx context.Context, tenantId string, id string, name string) (*domain.Group, error) {
-	groupID, err := parseStringToInt(id, "group ID")
-	if err != nil {
-		return nil, err
-	}
-
+func (s *groupService) UpdateGroup(ctx context.Context, tenantName string, id int, name string) (*domain.Group, error) {
 	if name == "" {
 		return nil, fmt.Errorf("group name is required")
 	}
 
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Release()
 
 	group := &domain.Group{
-		ID:   groupID,
+		ID:   id,
 		Name: name,
 	}
 
@@ -158,26 +128,22 @@ func (s *groupService) UpdateGroup(ctx context.Context, tenantId string, id stri
 }
 
 // DeleteGroup deletes a group
-func (s *groupService) DeleteGroup(ctx context.Context, tenantId string, id string) (*domain.Group, error) {
-	groupID, err := parseStringToInt(id, "group ID")
-	if err != nil {
-		return nil, err
-	}
+func (s *groupService) DeleteGroup(ctx context.Context, tenantName string, id int) (*domain.Group, error) {
 
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Release()
 
 	// Get group first to return it
-	group, err := s.groupRepo.GetGroup(ctx, conn, groupID)
+	group, err := s.groupRepo.GetGroup(ctx, conn, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group: %w", err)
 	}
 
 	// Delete group
-	err = s.groupRepo.DeleteGroup(ctx, conn, groupID)
+	err = s.groupRepo.DeleteGroup(ctx, conn, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to delete group: %w", err)
 	}
@@ -186,7 +152,7 @@ func (s *groupService) DeleteGroup(ctx context.Context, tenantId string, id stri
 }
 
 // ListGroups lists groups with pagination
-func (s *groupService) ListGroups(ctx context.Context, tenantId string, page int, pageSize int) ([]*domain.Group, error) {
+func (s *groupService) ListGroups(ctx context.Context, tenantName string, page int, pageSize int) ([]*domain.Group, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -194,7 +160,7 @@ func (s *groupService) ListGroups(ctx context.Context, tenantId string, page int
 		pageSize = 20
 	}
 
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
@@ -209,19 +175,12 @@ func (s *groupService) ListGroups(ctx context.Context, tenantId string, page int
 }
 
 // SearchGroups searches groups by name
-func (s *groupService) SearchGroups(ctx context.Context, tenantId string, query string, page int, pageSize int) ([]*domain.Group, error) {
+func (s *groupService) SearchGroups(ctx context.Context, tenantName string, query string, page int, pageSize int) ([]*domain.Group, error) {
 	if query == "" {
-		return s.ListGroups(ctx, tenantId, page, pageSize)
+		return s.ListGroups(ctx, tenantName, page, pageSize)
 	}
-
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 20
-	}
-
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
@@ -236,24 +195,15 @@ func (s *groupService) SearchGroups(ctx context.Context, tenantId string, query 
 }
 
 // AddPermissionToGroup adds a permission to a group
-func (s *groupService) AddPermissionToGroup(ctx context.Context, tenantId string, groupId string, permissionId string) error {
-	groupID, err := parseStringToInt(groupId, "group ID")
-	if err != nil {
-		return err
-	}
+func (s *groupService) AddPermissionToGroup(ctx context.Context, tenantName string, groupId int, permissionId int) error {
 
-	permissionID, err := parseStringToInt(permissionId, "permission ID")
-	if err != nil {
-		return err
-	}
-
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return err
 	}
 	defer conn.Release()
 
-	err = s.groupRepo.AddPermissionToGroup(ctx, conn, groupID, permissionID)
+	err = s.groupRepo.AddPermissionToGroup(ctx, conn, groupId, permissionId)
 	if err != nil {
 		return fmt.Errorf("failed to add permission to group: %w", err)
 	}
@@ -262,24 +212,38 @@ func (s *groupService) AddPermissionToGroup(ctx context.Context, tenantId string
 }
 
 // RemovePermissionFromGroup removes a permission from a group
-func (s *groupService) RemovePermissionFromGroup(ctx context.Context, tenantId string, groupId string, permissionId string) error {
-	groupID, err := parseStringToInt(groupId, "group ID")
-	if err != nil {
-		return err
-	}
-
-	permissionID, err := parseStringToInt(permissionId, "permission ID")
-	if err != nil {
-		return err
-	}
-
-	conn, err := s.getConnForTenant(ctx, tenantId)
+func (s *groupService) RemovePermissionFromGroup(ctx context.Context, tenantName string, groupId int, permissionId int) error {
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return err
 	}
 	defer conn.Release()
 
-	err = s.groupRepo.RemovePermissionFromGroup(ctx, conn, groupID, permissionID)
+	group, err := s.groupRepo.GetGroup(ctx, conn, groupId)
+	if err != nil {
+		return fmt.Errorf("failed to get group details: %w", err)
+	}
+
+	if group.Name == "admin" {
+		permission, err := s.groupRepo.GetPermission(ctx, conn, permissionId)
+		if err != nil {
+			return fmt.Errorf("failed to get permission details: %w", err)
+		}
+
+		isSystemPermission := false
+		for _, perm := range domain.DefaultPermissions {
+			if permission.Name == perm {
+				isSystemPermission = true
+				break
+			}
+		}
+		
+		if isSystemPermission {
+			return fmt.Errorf("cannot remove system permission '%s' from admin group", permission.Name)
+		}
+	}
+
+	err = s.groupRepo.RemovePermissionFromGroup(ctx, conn, groupId, permissionId)
 	if err != nil {
 		return fmt.Errorf("failed to remove permission from group: %w", err)
 	}
@@ -288,19 +252,15 @@ func (s *groupService) RemovePermissionFromGroup(ctx context.Context, tenantId s
 }
 
 // GetGroupPermissions gets all permissions for a group
-func (s *groupService) GetGroupPermissions(ctx context.Context, tenantId string, groupId string) ([]*domain.Permission, error) {
-	groupID, err := parseStringToInt(groupId, "group ID")
-	if err != nil {
-		return nil, err
-	}
+func (s *groupService) GetGroupPermissions(ctx context.Context, tenantName string, groupId int) ([]*domain.Permission, error) {
 
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Release()
 
-	permissions, err := s.groupRepo.GetGroupPermissions(ctx, conn, groupID)
+	permissions, err := s.groupRepo.GetGroupPermissions(ctx, conn, groupId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group permissions: %w", err)
 	}
@@ -309,24 +269,52 @@ func (s *groupService) GetGroupPermissions(ctx context.Context, tenantId string,
 }
 
 // SetGroupPermissions sets all permissions for a group (replaces existing)
-func (s *groupService) SetGroupPermissions(ctx context.Context, tenantId string, groupId string, permissionIds []string) error {
-	groupID, err := parseStringToInt(groupId, "group ID")
-	if err != nil {
-		return err
-	}
-
-	permissionIDs, err := parseStringSliceToIntSlice(permissionIds, "permission ID")
-	if err != nil {
-		return err
-	}
-
-	conn, err := s.getConnForTenant(ctx, tenantId)
+func (s *groupService) SetGroupPermissions(ctx context.Context, tenantName string, groupId int, permissionIds []int) error {
+	
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return err
 	}
 	defer conn.Release()
 
-	err = s.groupRepo.SetGroupPermissions(ctx, conn, groupID, permissionIDs)
+	// Check if this is the admin group
+	group, err := s.groupRepo.GetGroup(ctx, conn, groupId)
+	if err != nil {
+		return fmt.Errorf("failed to get group details: %w", err)
+	}
+
+	// If it's the admin group, ensure all system permissions are included
+	if group.Name == "admin" {
+		// Get all system permission names
+		systemPermissions := domain.DefaultPermissions
+
+		// Create a map of existing permission IDs for quick lookup
+		existingPermIds := make(map[int]bool)
+		for _, pid := range permissionIds {
+			existingPermIds[pid] = true
+		}
+
+		// For each system permission, ensure it's in the list
+		for _, sysPerm := range systemPermissions {
+			// Get permission by name
+			perm, err := s.groupRepo.GetPermissionByName(ctx, conn, sysPerm)
+			if err != nil {
+				log.Printf("Warning: System permission '%s' not found for admin group in tenant %s",
+					sysPerm, tenantName)
+				continue
+			}
+
+			// Add to list if not already present
+			if !existingPermIds[perm.ID] {
+				permissionIds = append(permissionIds, perm.ID)
+				existingPermIds[perm.ID] = true
+				log.Printf("Added system permission '%s' (ID: %d) to admin group in tenant %s",
+					perm.Name, perm.ID, tenantName)
+			}
+		}
+	}
+
+	err = s.groupRepo.SetGroupPermissions(ctx, conn, groupId, permissionIds)
 	if err != nil {
 		return fmt.Errorf("failed to set group permissions: %w", err)
 	}
@@ -335,43 +323,35 @@ func (s *groupService) SetGroupPermissions(ctx context.Context, tenantId string,
 }
 
 // CreatePermission creates a new permission
-func (s *groupService) CreatePermission(ctx context.Context, tenantId string, name string) (*domain.Permission, error) {
+func (s *groupService) CreatePermission(ctx context.Context, tenantName string, name string) (*domain.Permission, error) {
 	if name == "" {
 		return nil, fmt.Errorf("permission name is required")
 	}
 
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Release()
 
-	permission := &domain.Permission{
-		Name: name,
-	}
-
-	createdPermission, err := s.groupRepo.CreatePermission(ctx, conn, permission)
+	createdPermission, err := s.groupRepo.CreatePermission(ctx, conn, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create permission: %w", err)
 	}
-
+	
 	return createdPermission, nil
 }
 
 // GetPermission retrieves a permission by ID
-func (s *groupService) GetPermission(ctx context.Context, tenantId string, id string) (*domain.Permission, error) {
-	permissionID, err := parseStringToInt(id, "permission ID")
-	if err != nil {
-		return nil, err
-	}
-
-	conn, err := s.getConnForTenant(ctx, tenantId)
+func (s *groupService) GetPermission(ctx context.Context, tenantName string, id int) (*domain.Permission, error) {
+	
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Release()
 
-	permission, err := s.groupRepo.GetPermission(ctx, conn, permissionID)
+	permission, err := s.groupRepo.GetPermission(ctx, conn, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get permission: %w", err)
 	}
@@ -380,12 +360,12 @@ func (s *groupService) GetPermission(ctx context.Context, tenantId string, id st
 }
 
 // GetPermissionByName retrieves a permission by name
-func (s *groupService) GetPermissionByName(ctx context.Context, tenantId string, name string) (*domain.Permission, error) {
+func (s *groupService) GetPermissionByName(ctx context.Context, tenantName string, name string) (*domain.Permission, error) {
 	if name == "" {
 		return nil, fmt.Errorf("permission name is required")
 	}
 
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
@@ -399,50 +379,56 @@ func (s *groupService) GetPermissionByName(ctx context.Context, tenantId string,
 	return permission, nil
 }
 
-// UpdatePermission updates permission information
-func (s *groupService) UpdatePermission(ctx context.Context, tenantId string, id string, name string) (*domain.Permission, error) {
-	permissionID, err := parseStringToInt(id, "permission ID")
-	if err != nil {
-		return nil, err
-	}
-
+func (s *groupService) UpdatePermission(ctx context.Context, tenantName string, id int, name string) (*domain.Permission,error) {
 	if name == "" {
 		return nil, fmt.Errorf("permission name is required")
 	}
-
-	conn, err := s.getConnForTenant(ctx, tenantId)
+	
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Release()
-
-	permission := &domain.Permission{
-		ID:   permissionID,
+	
+	permission, err := s.groupRepo.UpdatePermission(ctx, conn, &domain.Permission{
+		ID: id,
 		Name: name,
-	}
-
-	updatedPermission, err := s.groupRepo.UpdatePermission(ctx, conn, permission)
+	})
+	
 	if err != nil {
 		return nil, fmt.Errorf("failed to update permission: %w", err)
 	}
-
-	return updatedPermission, nil
+	return permission,nil
 }
 
 // DeletePermission deletes a permission
-func (s *groupService) DeletePermission(ctx context.Context, tenantId string, id string) error {
-	permissionID, err := parseStringToInt(id, "permission ID")
-	if err != nil {
-		return err
-	}
-
-	conn, err := s.getConnForTenant(ctx, tenantId)
+func (s *groupService) DeletePermission(ctx context.Context, tenantName string, id int) error {
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return err
 	}
 	defer conn.Release()
 
-	err = s.groupRepo.DeletePermission(ctx, conn, permissionID)
+	// Get permission details to check if it's a system permission
+	permission, err := s.groupRepo.GetPermission(ctx, conn, id)
+	if err != nil {
+		return fmt.Errorf("failed to get permission details: %w", err)
+	}
+
+	// Check if this is a system permission
+	isSystemPermission := false
+	for _, sysPerm := range domain.DefaultPermissions {
+		if permission.Name == sysPerm {
+			isSystemPermission = true
+			break
+		}
+	}
+
+	if isSystemPermission {
+		return fmt.Errorf("cannot delete system permission: '%s'", permission.Name)
+	}
+
+	err = s.groupRepo.DeletePermission(ctx, conn, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete permission: %w", err)
 	}
@@ -451,15 +437,8 @@ func (s *groupService) DeletePermission(ctx context.Context, tenantId string, id
 }
 
 // ListPermissions lists permissions with pagination
-func (s *groupService) ListPermissions(ctx context.Context, tenantId string, page int, pageSize int) ([]*domain.Permission, error) {
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 20
-	}
-
-	conn, err := s.getConnForTenant(ctx, tenantId)
+func (s *groupService) ListPermissions(ctx context.Context, tenantName string, page int, pageSize int) ([]*domain.Permission, error) {
+	conn, err := s.getConnForTenant(ctx, tenantName)
 	if err != nil {
 		return nil, err
 	}
@@ -471,4 +450,42 @@ func (s *groupService) ListPermissions(ctx context.Context, tenantId string, pag
 	}
 
 	return permissions, nil
+}
+
+// UserHasPermission checks if a user has a specific permission through their groups
+func (s *groupService) UserHasPermission(ctx context.Context, tenantName string, userId int, permissionId int) (bool, error) {
+
+	
+	conn, err := s.getConnForTenant(ctx, tenantName)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Release()
+
+	hasPermission, err := s.groupRepo.UserHasPermission(ctx, conn, userId, permissionId)
+	if err != nil {
+		return false, fmt.Errorf("failed to check user permission: %w", err)
+	}
+
+	return hasPermission, nil
+}
+
+// UserHasPermissionByName checks if a user has a specific permission by permission name through their groups
+func (s *groupService) UserHasPermissionByName(ctx context.Context, tenantName string, userId int, permissionName string) (bool, error) {
+	if permissionName == "" {
+		return false, fmt.Errorf("permission name is required")
+	}
+
+	conn, err := s.getConnForTenant(ctx, tenantName)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Release()
+
+	hasPermission, err := s.groupRepo.UserHasPermissionByName(ctx, conn, userId, permissionName)
+	if err != nil {
+		return false, fmt.Errorf("failed to check user permission by name: %w", err)
+	}
+
+	return hasPermission, nil
 }

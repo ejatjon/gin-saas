@@ -15,7 +15,7 @@ func (m *middleware)SubDomainMiddleware() gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusBadRequest)
 			return
 		}
-		c.Set("tenant", tenant)
+		c.Set("TenantName", tenant)
 		c.Next()
 	}
 }

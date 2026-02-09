@@ -83,6 +83,45 @@ func (m *DBManager) CreateSchema(ctx context.Context, schema string) (*pgxpool.C
 	return conn, nil
 }
 
+// ListSchemas 列出所有已存在的schema
+func (m *DBManager) ListSchemas(ctx context.Context) ([]string, error) {
+	conn, err := m.pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Release()
+
+	// Query all schemas, excluding system schemas
+	query := `
+		SELECT schema_name
+		FROM information_schema.schemata
+		WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+		AND schema_name NOT LIKE 'pg_%'
+		ORDER BY schema_name
+	`
+
+	rows, err := conn.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list schemas: %w", err)
+	}
+	defer rows.Close()
+
+	var schemas []string
+	for rows.Next() {
+		var schemaName string
+		if err := rows.Scan(&schemaName); err != nil {
+			return nil, fmt.Errorf("failed to scan schema name: %w", err)
+		}
+		schemas = append(schemas, schemaName)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating schema rows: %w", err)
+	}
+
+	return schemas, nil
+}
+
 // 注册schema创建器
 func (m *DBManager) RegisterSchemaCreator(serviceName string, creator func(ctx context.Context, conn *pgxpool.Conn) error) {
 	m.schemaCreatorsMap[serviceName] = creator

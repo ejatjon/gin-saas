@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 
 	"saas/src/bootstrap"
 	general_domain "saas/src/general/domain"
@@ -16,6 +17,9 @@ import (
 )
 
 func main() {
+	// Create a context for initialization
+	ctx := context.Background()
+
 	// Initialize configuration
 	config := bootstrap.InitConfig()
 
@@ -73,15 +77,34 @@ func main() {
 	dbManager.RegisterSchemaCreator("users", general_domain.CreateUserTable)
 	dbManager.RegisterSchemaCreator("groups_permissions", general_domain.CreateGroupPermissionTable)
 
-	// Initialize middleware
-	generalMiddleware := general_middleware.NewMiddleware(config)
-
-	// Initialize repository
+	// Initialize repositories
 	userRepo := general_repository.NewUserRepository()
+	groupRepo := general_repository.NewGroupRepository()
 
-	// Initialize user service
-	userService := general_service.NewUserService(dbManager, userRepo)
-	_ = userService // Mark as used for now
+	// Initialize services
+	authService := general_service.NewAuthService(config)
+	_ = general_service.NewUserService(dbManager, userRepo)
+	groupService := general_service.NewGroupService(dbManager, groupRepo)
+	initService := general_service.NewInitService(dbManager, groupRepo, groupService)
+
+	// Initialize middleware with services
+	generalMiddleware := general_middleware.NewMiddleware(config, authService, groupService)
+
+	// Initialize permissions for all existing schemas on startup
+	log.Println("Initializing permissions for all existing schemas...")
+	if err := initializePermissionsForAllSchemas(ctx, dbManager, initService); err != nil {
+		log.Printf("Warning: Failed to initialize permissions for some schemas: %v", err)
+	} else {
+		log.Println("Successfully initialized permissions for all schemas")
+	}
+
+	// Initialize public schema permissions if needed
+	log.Println("Initializing public schema permissions...")
+	if err := initService.InitializeTenantSchema(ctx, "public"); err != nil {
+		log.Printf("Warning: Failed to initialize public schema permissions: %v", err)
+	} else {
+		log.Println("Successfully initialized public schema permissions")
+	}
 
 	// Initialize controllers
 	// Note: authController currently not implemented, skipping for now
@@ -197,22 +220,36 @@ func main() {
 				return
 			}
 
+			// Initialize permissions and default groups for the new tenant
+			if err := initService.InitializeTenantSchema(context.Background(), tenant); err != nil {
+				c.JSON(500, gin.H{
+					"error":   "Failed to initialize permissions and default groups",
+					"details": err.Error(),
+				})
+				return
+			}
+
 			c.JSON(200, gin.H{
 				"message":        fmt.Sprintf("Tenant schema '%s' created successfully", tenant),
 				"tables_created": []string{"users", "groups", "permissions", "group_permissions"},
+				"initialized":    true,
 			})
 		})
 
 		// Protected tenant routes (require authentication)
 		protectedTenantRoutes := tenantRoutes.Group("/")
-		// TODO: Add authentication middleware when implemented
-		// protectedTenantRoutes.Use(authMiddleware.RequireAuth())
+		// Add authentication middleware
+		protectedTenantRoutes.Use(generalMiddleware.AuthMiddleware())
 		{
 			// User profile endpoint
 			protectedTenantRoutes.GET("/profile", func(c *gin.Context) {
-				// TODO: Get user ID from JWT token after authentication is implemented
-				// For now, use a test user ID
-				userID := 1
+				// Get user ID from JWT token (set by AuthMiddleware)
+				userIDValue, exists := c.Get("UserID")
+				if !exists {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+					return
+				}
+				userID := userIDValue.(int)
 
 				tenant := c.MustGet("tenant").(string)
 
@@ -253,9 +290,13 @@ func main() {
 
 			// Update user profile endpoint
 			protectedTenantRoutes.PUT("/profile", func(c *gin.Context) {
-				// TODO: Get user ID from JWT token after authentication is implemented
-				// For now, use a test user ID
-				userID := 1
+				// Get user ID from JWT token (set by AuthMiddleware)
+				userIDValue, exists := c.Get("UserID")
+				if !exists {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+					return
+				}
+				userID := userIDValue.(int)
 
 				tenant := c.MustGet("tenant").(string)
 
@@ -339,6 +380,71 @@ func main() {
 					},
 				})
 			})
+
+			// Admin endpoint - requires admin permission
+			protectedTenantRoutes.GET("/admin", generalMiddleware.RequirePermission("admin"), func(c *gin.Context) {
+				// Get user ID from JWT token (set by AuthMiddleware)
+				userIDValue, exists := c.Get("UserID")
+				if !exists {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+					return
+				}
+				userID := userIDValue.(int)
+
+				tenant := c.MustGet("tenant").(string)
+
+				c.JSON(200, gin.H{
+					"message":     "Welcome to admin panel",
+					"user_id":     userID,
+					"tenant":      tenant,
+					"permissions": "admin access granted",
+				})
+			})
+
+			// Admin management endpoint - requires multiple permissions
+			protectedTenantRoutes.GET("/admin/users", generalMiddleware.RequireAnyPermission([]string{"admin", "user_management"}), func(c *gin.Context) {
+				tenant := c.MustGet("tenant").(string)
+
+				// Get connection for tenant schema
+				conn, err := dbManager.GetConnForSchema(context.Background(), tenant)
+				if err != nil {
+					c.JSON(500, gin.H{
+						"error":   "Failed to get tenant database connection",
+						"details": err.Error(),
+					})
+					return
+				}
+				defer conn.Release()
+
+				// Get users list (simplified - in real implementation would use userService)
+				users, err := userRepo.ListUsers(context.Background(), conn, 1, 10)
+				if err != nil {
+					c.JSON(500, gin.H{
+						"error":   "Failed to get users list",
+						"details": err.Error(),
+					})
+					return
+				}
+
+				// Return simplified user info
+				var userList []gin.H
+				for _, user := range users {
+					userList = append(userList, gin.H{
+						"id":         user.ID,
+						"username":   user.Username,
+						"email":      user.Email,
+						"first_name": user.FirstName,
+						"last_name":  user.LastName,
+						"status":     user.Status,
+					})
+				}
+
+				c.JSON(200, gin.H{
+					"message": "User list retrieved",
+					"users":   userList,
+					"count":   len(userList),
+				})
+			})
 		}
 	}
 
@@ -381,4 +487,34 @@ func main() {
 	if err := router.Run(serverAddr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+// initializePermissionsForAllSchemas initializes permissions and default groups for all existing schemas
+func initializePermissionsForAllSchemas(ctx context.Context, dbManager *bootstrap.DBManager, initService general_service.InitService) error {
+	// Get all existing schemas
+	schemas, err := dbManager.ListSchemas(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list schemas: %w", err)
+	}
+
+	// Filter out public schema if it exists
+	var tenantSchemas []string
+	for _, schema := range schemas {
+		if schema != "public" {
+			tenantSchemas = append(tenantSchemas, schema)
+		}
+	}
+
+	log.Printf("Found %d tenant schemas to initialize", len(tenantSchemas))
+
+	// Initialize each schema
+	for _, schema := range tenantSchemas {
+		log.Printf("Initializing schema: %s", schema)
+		if err := initService.InitializeTenantSchema(ctx, schema); err != nil {
+			log.Printf("Error initializing schema %s: %v", schema, err)
+			// Continue with other schemas even if one fails
+		}
+	}
+
+	return nil
 }
